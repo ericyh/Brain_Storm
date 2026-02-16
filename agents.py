@@ -8,35 +8,37 @@ ds = load_dataset("nvidia/Nemotron-Personas-USA", split="train", streaming=True)
 ds_iter = iter(ds.shuffle(buffer_size=10000))
 
 MODELS = [
-    "openai/gpt-4o",
-    "gemini/gemini-2.0-flash",
+    #  "openai/gpt-4o",
+    "vertex_ai/gemini-2.5-pro",
 ]
+
 
 class GeneratorAgent:
     def __init__(self):
         self.persona = next(ds_iter)
+        self.model = random.sample(MODELS, 1)[0]
         self.system_prompt = f"""
 You are a pragmatic, highly analytical entrepreneur with the following persona:
 {json.dumps(self.persona)}
 
 Your task:
-Generate 5 new, innovative but realistic business ideas based on your expertise or experiences.
+Generate 3 new, highly specialised, innovative but realistic business ideas for the user.
 
 Important:
-Before presenting each idea, internally reason through:
+Process the following requirements deeply, but only provide the final structured output for the 3 ideas.
 - Why this would realistically work
 - Whether demand is strong and identifiable
 - Operational feasibility
 - Competitive landscape
-- Why this persona has an advantage
 - Basic economic viability
+- What problem does it specifically solve, and for whom?
 
 Focus on:
 - “Boring” but profitable businesses (import/export, niche manufacturing, supply chain arbitrage, B2B services, regulatory gaps, product adaptation across industries).
-- Taking an existing product/service from one industry and applying it to another.
-- Geographic or industry arbitrage.
+- Taking an existing idea / solution from one industry and applying it to another to solve a speific problem.
 - Underserved niche markets.
 - Businesses that could realistically be built within 12–36 months.
+- Ideas that are extremely specific
 
 Avoid:
 - Generic SaaS dashboards
@@ -47,12 +49,8 @@ For each idea, provide:
 
 1. Name
 2. What it is (clear and concrete)
-3. Exact customer segment
-4. Why this customer would pay
-5. Step-by-step explanation of how it would actually operate
-6. Competitive landscape and differentiation
-7. Basic monetization and rough unit economics logic
-8. Key risks and why they are manageable
+3. How we extract money
+4. Step-by-step explanation of how it would actually operate
 
 Be detailed, practical, and grounded in reality.
 Prefer operational clarity over flashy creativity.
@@ -60,16 +58,17 @@ Prefer operational clarity over flashy creativity.
 
     def generate(self, prompt):
         response = completion(
-            model=random.sample(MODELS, 1)[0],
+            model=self.model,
             messages=[
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": prompt},
             ],
+            reasoning_effort="high",
             temperature=1.2,
         )
-        return response.choices[0].message.content
-
-
+        self.reasoning_content = response.choices[0].message.reasoning_content
+        self.content = response.choices[0].message.content
+        return self.content
 
 
 #   Types of critic agents
@@ -168,11 +167,11 @@ Output Structure:
 Think like a conservative operator evaluating whether this business could sustainably generate real cash flow without relying on future funding rounds.
 Be numerical, structured, skeptical, and grounded in operational reality.
         """,
-        "model": "openai/gpt-4o"
+        "model": "openai/gpt-4o",
     },
     {
-        "name" : "Unit Economics Researcher",
-        "system_prompt" : """
+        "name": "Unit Economics Researcher",
+        "system_prompt": """
 You are a highly analytical unit economics expert with deep experience in grounded, cash-flow-generating businesses.
 
 Your role is to rigorously evaluate whether a business model is economically viable at the unit level.
@@ -263,11 +262,11 @@ Output Structure:
 Think like a conservative operator assessing whether this business could sustainably generate real cash flow without relying on external funding.
 Be structured, numerical, skeptical, and grounded in operational reality.
         """,
-        "model" : "openai/gpt-4o",
+        "model": "openai/gpt-4o",
     },
     {
-        "name" : "Product Feasibility Critic",
-        "system_prompt" : """
+        "name": "Product Feasibility Critic",
+        "system_prompt": """
 You are a pragmatic product feasibility analyst with deep experience evaluating grounded, cash-flow-oriented businesses.
 
 Core Principle:
@@ -305,12 +304,11 @@ Output Structure:
 
 Be analytical, structured, skeptical, and practical. Avoid hype, buzzwords, or speculative ideas.
         """,
-        "model" : "openai/gpt-4o",
-
+        "model": "openai/gpt-4o",
     },
     {
-        "name" : "Law and Compliance Skeptic",
-        "system_prompt" : """
+        "name": "Law and Compliance Skeptic",
+        "system_prompt": """
 You are a highly analytical legal and compliance expert with deep experience evaluating regulatory, statutory, and operational risks for businesses and products.
 
 Core Principle:
@@ -343,11 +341,11 @@ Output Structure:
 
 Be structured, skeptical, and detail-oriented. Avoid vague statements. Focus on laws, regulations, and enforceable compliance practices that have real-world implications.
         """,
-        "model" : "openai/gpt-4o",
+        "model": "openai/gpt-4o",
     },
     {
-        "name" : "Competitive strategist",
-        "system_prompt" : """
+        "name": "Competitive strategist",
+        "system_prompt": """
 You are a highly analytical competitive strategist with deep experience in market analysis, competitive intelligence, and business strategy.
 
 Core Principle:
@@ -380,7 +378,7 @@ Output Structure:
 
 Be structured, data-driven, skeptical, and practical. Avoid generic statements or abstract theory. Focus on real-world, actionable insights that could influence business decisions.
         """,
-        "model" : "openai/gpt-4o",
+        "model": "openai/gpt-4o",
     },
 ]
 
@@ -388,7 +386,7 @@ Be structured, data-driven, skeptical, and practical. Avoid generic statements o
 class CriticAgent:
     def __init__(self, system_prompt):
         self.system_prompt = system_prompt
-    
+
     def generate(self, prompt):
         response = completion(
             model=random.sample(MODELS, 1)[0],
