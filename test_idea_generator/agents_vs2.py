@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from litellm import completion
+
+# Load .env automatically if python-dotenv is installed (recommended)
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:
+    load_dotenv = None  # type: ignore
 
 try:
     from datasets import load_dataset  # type: ignore
@@ -17,20 +24,29 @@ except Exception:
 
 
 # ============================
-# Config + retry settings
+# Config (Gemini API key mode)
 # ============================
 
-MODELS = [
-    # "openai/gpt-4o",
-    "vertex_ai/gemini-2.5-pro",
-]
-DEFAULT_MODEL = MODELS[0] if MODELS else "vertex_ai/gemini-2.5-pro"
+if load_dotenv is not None:
+    load_dotenv()
+
+# Put your key in .env:
+# GOOGLE_API_KEY=...
+# (Optionally also GEMINI_API_KEY=... depending on your LiteLLM build)
+#
+# IMPORTANT:
+# - "vertex_ai/..." requires Google Cloud auth (service account / ADC)
+# - For a simple Gemini API key, use "gemini/..." models.
+
+MODELS = ["gemini/gemini-2.5-flash"]
+
+DEFAULT_MODEL = MODELS[0] if MODELS else "gemini/gemini-1.5-flash"
 MAX_RETRIES = 3
 BACKOFF_BASE_S = 1.4
 
 
 # ============================
-# PersonaSource: streams NVIDIA Nemotron personas safely
+# PersonaSource
 # ============================
 
 class PersonaSource:
@@ -72,7 +88,7 @@ class PersonaSource:
 
 
 # ============================
-# LLM call wrapper with retry/backoff
+# LLM call wrapper
 # ============================
 
 def _sleep_backoff(attempt: int) -> None:
@@ -83,17 +99,12 @@ def _call_llm(
     model: str,
     system: str,
     user: str,
-    temperature: float = 0.8,
-    reasoning_effort: Optional[str] = None,
+    temperature: float = 0.7,
     max_retries: int = MAX_RETRIES,
 ) -> str:
     last_err: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
-            kwargs: Dict[str, Any] = {}
-            if reasoning_effort is not None:
-                kwargs["reasoning_effort"] = reasoning_effort
-
             resp = completion(
                 model=model,
                 messages=[
@@ -101,7 +112,6 @@ def _call_llm(
                     {"role": "user", "content": user},
                 ],
                 temperature=temperature,
-                **kwargs,
             )
             return resp.choices[0].message.content
         except Exception as e:
@@ -112,7 +122,7 @@ def _call_llm(
 
 
 # ============================
-# JSON extraction + repair pass
+# JSON extraction + repair
 # ============================
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -148,7 +158,7 @@ def _safe_list(x: Any) -> List[str]:
 
 
 # ============================
-# Data structures for ideas + critiques
+# Data structures
 # ============================
 
 @dataclass
@@ -221,7 +231,7 @@ class Critique:
 
 
 # ============================
-# Worker + critic prompts (your style, structured outputs)
+# Prompts (structured outputs)
 # ============================
 
 WORKER_SYSTEM_PROMPT = """
@@ -287,45 +297,36 @@ Rules:
 
 
 critic_system_prompts: List[Dict[str, str]] = [
-    {"name": "Market Sizing Researcher", "system_prompt": """You are a highly analytical unit economics expert with deep operational experience in traditional, cash-flow-oriented businesses.
+    {"name": "Market Sizing Researcher", "system_prompt": """You are a conservative operator focused on grounded, cash-flow businesses.
 
-Define the core economic unit, estimate revenue/unit, costs/unit, gross margin, contribution margin, CAC/LTV/payback, working capital, and stress-test assumptions.
-Be conservative and explicit about assumptions. Use realistic ranges.
+Define the economic unit. Estimate revenue/unit, costs/unit, gross margin, CAC/LTV/payback, working capital, and stress-test assumptions.
+Be explicit and conservative.
 """},
     {"name": "Unit Economics Researcher", "system_prompt": """You are a unit economics critic. Evaluate CAC, servicing costs, churn risk, margin resilience, and payback.
-Be numerical where possible and list key sensitivities.
+List key sensitivities.
 """},
-    {"name": "Product Feasibility Critic", "system_prompt": """You are a product feasibility analyst. Assess build scope, dependencies, time-to-MVP, operational constraints, and key risks.
-Suggest changes to reduce complexity and increase feasibility.
+    {"name": "Product Feasibility Critic", "system_prompt": """You are a feasibility analyst. Assess build scope, dependencies, time-to-MVP, and operational constraints.
+Suggest scope cuts.
 """},
-    {"name": "Law and Compliance Skeptic", "system_prompt": """You are a legal/compliance skeptic. Identify applicable regulations, privacy risks, liabilities, and operational compliance requirements.
-Provide mitigations and severity priorities.
+    {"name": "Law and Compliance Skeptic", "system_prompt": """You are a legal/compliance skeptic. Identify privacy/regulatory risks and operational compliance requirements.
+Suggest mitigations.
 """},
     {"name": "Competitive Strategist", "system_prompt": """You are a competitive strategist. Identify competitors/substitutes, barriers, differentiation, and realistic defensibility.
-Give actionable competitive moves.
+Give actionable moves.
 """},
 ]
 
 _extra_critics = [
-    ("Distribution Realist", "You are a go-to-market operator. Pressure test acquisition channels, sales motion, and buyer reachability. Kill hand-wavy distribution."),
-    ("Pricing & Willingness-To-Pay", "You are a pricing strategist. Evaluate pricing power, who pays, realistic price points, and packaging."),
-    ("Retention & Stickiness", "You are a retention critic. Identify stickiness, churn drivers, and switching costs."),
-    ("Operational Load", "You are an operations lead. Estimate support burden, manual work, and firefighting risks."),
-    ("Scope Cutter", "You are a ruthless PM. Cut scope to a narrow MVP and identify bloat."),
-    ("Time-to-Revenue", "You are revenue-first. Estimate fastest path to first £/$ and what must be true."),
-    ("Founder Fit", "You evaluate founder-fit. Check match to skills/constraints and propose modifications."),
-    ("Data & Input Risk", "You challenge data assumptions. Identify data availability/quality risks and mitigations."),
-    ("Trust & Abuse", "You review trust/safety. Identify abuse modes and necessary guardrails."),
-    ("Moat & Wedge", "You evaluate defensibility. Check wedge strategy and sustainable advantage."),
-    ("Partnership Leverage", "You identify realistic channel partners and whether partnerships are plausible."),
-    ("Implementation Complexity", "You are a senior engineer. Assess integration complexity, edge cases, maintenance and reliability."),
-    ("Working Capital Risk", "You identify cash traps: payment terms, inventory, receivables, financing risk."),
-    ("Regulatory Practicality", "You focus on operational compliance: policies, logs, audits, procedures."),
-    ("Competitive Entry Response", "Assume an incumbent responds. How do they kill it and what counter-move prevents it?"),
+    ("Distribution Realist", "You are a go-to-market operator. Pressure test acquisition channels, sales motion, and buyer reachability."),
+    ("Pricing & WTP", "You are a pricing strategist. Evaluate pricing power, who pays, and realistic price points."),
+    ("Retention & Stickiness", "You are a retention critic. Identify churn drivers and switching costs."),
+    ("Operational Load", "You are an operations lead. Estimate support burden and manual ops risk."),
 ]
 for name, sys in _extra_critics:
     critic_system_prompts.append({"name": name, "system_prompt": sys})
-critic_system_prompts = critic_system_prompts[:20]
+
+# Keep this small for testing; you can expand back to 20 later.
+critic_system_prompts = critic_system_prompts[:8]
 
 
 SUPERVISOR_SYSTEM_PROMPT = """
@@ -354,7 +355,7 @@ No markdown. No extra keys.
 
 
 # ============================
-# Legacy agents (keep your current notebooks working)
+# Legacy agents (unchanged API)
 # ============================
 
 class GeneratorAgent:
@@ -368,58 +369,23 @@ class GeneratorAgent:
 You are a pragmatic, highly analytical entrepreneur with the following persona:
 {json.dumps(self.persona)}
 
-Your task:
-Generate 3 new, highly specialised, innovative but realistic business ideas for the user.
-
-Important:
-Process the following requirements deeply, but only provide the final structured output for the 3 ideas.
-- Why this would realistically work
-- Whether demand is strong and identifiable
-- Operational feasibility
-- Competitive landscape
-- Basic economic viability
-- What problem does it specifically solve, and for whom?
-
-Focus on:
-- “Boring” but profitable businesses (import/export, niche manufacturing, supply chain arbitrage, B2B services, regulatory gaps, product adaptation across industries).
-- Taking an existing idea / solution from one industry and applying it to another to solve a specific problem.
-- Underserved niche markets.
-- Businesses that could realistically be built within 12–36 months.
-- Ideas that are extremely specific
-
-Avoid:
-- Generic SaaS dashboards
-- Vague AI platforms
-- Overly speculative moonshots
-
-For each idea, provide:
-1. Name
-2. What it is (clear and concrete)
-3. How we extract money
-4. Step-by-step explanation of how it would actually operate
-
-Be detailed, practical, and grounded in reality.
-Prefer operational clarity over flashy creativity.
+Generate 3 specialised, realistic, cash-flow-oriented business ideas.
+For each idea provide:
+1) Name
+2) What it is
+3) How we extract money
+4) Step-by-step operations
 """.strip()
 
-        self.reasoning_content = None
         self.content = None
 
     def generate(self, prompt: str) -> str:
-        resp = completion(
+        self.content = _call_llm(
             model=self.model,
-            messages=[
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user", "content": prompt},
-            ],
-            reasoning_effort="high",
-            temperature=1.2,
+            system=self.system_prompt,
+            user=prompt,
+            temperature=1.0,
         )
-        try:
-            self.reasoning_content = resp.choices[0].message.reasoning_content
-        except Exception:
-            self.reasoning_content = None
-        self.content = resp.choices[0].message.content
         return self.content
 
 
@@ -434,13 +400,12 @@ class CriticAgent:
             model=model,
             system=self.system_prompt,
             user=f"Business idea to analyse:\n{prompt}",
-            temperature=0.8,
-            reasoning_effort=None,
+            temperature=0.7,
         )
 
 
 # ============================
-# WorkerAgent + PanelCritic: structured generation/critique
+# WorkerAgent + PanelCritic
 # ============================
 
 @dataclass
@@ -465,8 +430,6 @@ Generate ONE idea. Output STRICT JSON only.
             system=WORKER_SYSTEM_PROMPT,
             user=user,
             temperature=1.0,
-            reasoning_effort="high",
-            max_retries=MAX_RETRIES,
         )
         data = _json_or_repair(self.model, raw)
 
@@ -513,9 +476,7 @@ IDEA (JSON):
             model=self.model,
             system=self.system_prompt,
             user=user,
-            temperature=0.6,
-            reasoning_effort=None,
-            max_retries=MAX_RETRIES,
+            temperature=0.5,
         )
         data = _json_or_repair(self.model, raw)
 
@@ -546,7 +507,7 @@ IDEA (JSON):
 
 
 # ============================
-# Dedupe: removes near-duplicates cheaply without embeddings
+# Dedupe
 # ============================
 
 def _normalize(s: str) -> str:
@@ -584,14 +545,14 @@ def dedupe_ideas(ideas: List[Idea]) -> List[Idea]:
 
 
 # ============================
-# SupervisorAgent: orchestrates workers -> critics -> shortlist decisions
+# SupervisorAgent (defaults lowered for free-tier testing)
 # ============================
 
 class SupervisorAgent:
     def __init__(
         self,
-        worker_count: int = 100,
-        critic_count: int = 20,
+        worker_count: int = 8,   # lowered for testing
+        critic_count: int = 4,   # lowered for testing
         seed: int = 7,
         model: Optional[str] = None,
         persona_seed: int = 7,
@@ -633,7 +594,7 @@ class SupervisorAgent:
         query: str = "",
         skills_text: str = "",
         extra: str = "",
-        top_k: int = 10,
+        top_k: int = 5,
         max_workers: Optional[int] = None,
         max_critics: Optional[int] = None,
     ) -> Dict[str, Any]:
@@ -719,11 +680,11 @@ class SupervisorAgent:
         return rows
 
     def _final_shortlist(self, brief: str, aggregate: List[Dict[str, Any]], top_k: int) -> Dict[str, Any]:
-        candidates = aggregate[: min(30, len(aggregate))]
+        candidates = aggregate[: min(12, len(aggregate))]
         user = (
             "USER_PROFILE_AND_BRIEF:\n"
             f"{brief}\n\n"
-            "CANDIDATES (top aggregated):\n"
+            "CANDIDATES:\n"
             f"{json.dumps(candidates, ensure_ascii=False)}\n\n"
             f"Pick up to {top_k} ideas.\n"
             "Return STRICT JSON only (schema in system prompt)."
@@ -732,15 +693,14 @@ class SupervisorAgent:
             model=self.model,
             system=SUPERVISOR_SYSTEM_PROMPT,
             user=user,
-            temperature=0.5,
-            reasoning_effort="high",
+            temperature=0.4,
             max_retries=MAX_RETRIES,
         )
         return _json_or_repair(self.model, raw)
 
 
 # ============================
-# Convenience helper for a one-shot supervised run
+# Convenience helper
 # ============================
 
 def run_supervised_generation(
@@ -748,9 +708,9 @@ def run_supervised_generation(
     query: str = "",
     skills_text: str = "",
     extra: str = "",
-    worker_count: int = 100,
-    critic_count: int = 20,
-    top_k: int = 10,
+    worker_count: int = 8,
+    critic_count: int = 4,
+    top_k: int = 5,
     seed: int = 7,
 ) -> Dict[str, Any]:
     sup = SupervisorAgent(
@@ -760,3 +720,11 @@ def run_supervised_generation(
         persona_seed=seed,
     )
     return sup.run(profile=profile, query=query, skills_text=skills_text, extra=extra, top_k=top_k)
+
+
+def _assert_key_present() -> None:
+    # Helpful sanity check for Gemini API key setups.
+    if not (os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")):
+        raise RuntimeError(
+            "Missing API key. Set GOOGLE_API_KEY (recommended) in your environment or .env file."
+        )
